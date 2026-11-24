@@ -7,7 +7,11 @@ import { ResultsDashboard } from './components/ResultsDashboard';
 import { ScanHistoryTable } from './components/ScanHistoryTable';
 import { TopBar } from './components/TopBar';
 import { initFirebaseAnalytics, trackScamEvent } from './lib/firebase';
-import { analyzeScamMessage, detectOnDeviceCapability } from './services/scamAnalyzer';
+import {
+  analyzeScamMessage,
+  detectOnDeviceCapability,
+  prewarmAnalyzer,
+} from './services/scamAnalyzer';
 import type {
   ChannelType,
   OnDeviceCapability,
@@ -88,6 +92,7 @@ export default function App() {
     const detected = await detectOnDeviceCapability();
     setCapability(detected);
     setCheckingCapability(false);
+    prewarmAnalyzer(detected);
   }, []);
 
   useEffect(() => {
