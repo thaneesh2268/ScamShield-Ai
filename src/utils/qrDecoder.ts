@@ -1,7 +1,8 @@
 import jsQR from 'jsqr';
 import type { UploadedEvidenceImage } from '../types/scam';
 
-const MAX_IMAGE_DIMENSION = 1600;
+const MAX_QR_SCAN_DIMENSION = 1600;
+const MAX_UPLOAD_DIMENSION = 1280;
 
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -29,7 +30,7 @@ function loadImage(src: string): Promise<HTMLImageElement> {
 
 function decodeQrFromCanvas(img: HTMLImageElement): string | null {
   try {
-    const scale = Math.min(1, MAX_IMAGE_DIMENSION / Math.max(img.width, img.height, 1));
+    const scale = Math.min(1, MAX_QR_SCAN_DIMENSION / Math.max(img.width, img.height, 1));
     const width = Math.max(1, Math.round(img.width * scale));
     const height = Math.max(1, Math.round(img.height * scale));
 
@@ -51,23 +52,66 @@ function decodeQrFromCanvas(img: HTMLImageElement): string | null {
   }
 }
 
+function compressForFastUpload(
+  img: HTMLImageElement,
+  originalDataUrl: string,
+  originalMimeType: string,
+  originalSizeBytes: number
+): { dataUrl: string; mimeType: string } {
+  const needsResize =
+    Math.max(img.width, img.height) > MAX_UPLOAD_DIMENSION || originalSizeBytes > 350_000;
+
+  if (!needsResize) {
+    return { dataUrl: originalDataUrl, mimeType: originalMimeType || 'image/png' };
+  }
+
+  try {
+    const scale = Math.min(1, MAX_UPLOAD_DIMENSION / Math.max(img.width, img.height, 1));
+    const width = Math.max(1, Math.round(img.width * scale));
+    const height = Math.max(1, Math.round(img.height * scale));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      return { dataUrl: originalDataUrl, mimeType: originalMimeType || 'image/png' };
+    }
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(img, 0, 0, width, height);
+    const compressedUrl = canvas.toDataURL('image/jpeg', 0.85);
+    return { dataUrl: compressedUrl, mimeType: 'image/jpeg' };
+  } catch {
+    return { dataUrl: originalDataUrl, mimeType: originalMimeType || 'image/png' };
+  }
+}
+
 export async function processUploadedImage(file: File): Promise<UploadedEvidenceImage> {
   if (!file.type.startsWith('image/')) {
     throw new Error('Please upload an image file (PNG, JPG, WebP) from your gallery.');
   }
 
-  const dataUrl = await readFileAsDataUrl(file);
-  const img = await loadImage(dataUrl);
+  const rawDataUrl = await readFileAsDataUrl(file);
+  const img = await loadImage(rawDataUrl);
   const decodedQrText = decodeQrFromCanvas(img);
+
+  const { dataUrl, mimeType } = compressForFastUpload(
+    img,
+    rawDataUrl,
+    file.type,
+    file.size
+  );
 
   const commaIndex = dataUrl.indexOf(',');
   const base64Data = commaIndex !== -1 ? dataUrl.slice(commaIndex + 1) : dataUrl;
 
   return {
     name: file.name,
-    mimeType: file.type || 'image/png',
+    mimeType,
     base64Data,
-    previewUrl: dataUrl,
+    previewUrl: rawDataUrl,
     sizeBytes: file.size,
     decodedQrText,
   };

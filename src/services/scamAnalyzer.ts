@@ -1,4 +1,4 @@
-import { getGenerativeModel, Schema, type Part } from 'firebase/ai';
+import { getGenerativeModel, Schema, type GenerativeModel, type Part } from 'firebase/ai';
 import { getSourceContextLabel } from '../data/samples';
 import { firebaseAI, trackScamEvent } from '../lib/firebase';
 import type {
@@ -18,7 +18,9 @@ import {
 
 interface ChromeLanguageModelSession {
   prompt: (input: string) => Promise<string>;
+  clone?: () => Promise<ChromeLanguageModelSession>;
   destroy?: () => void;
+  tokensLeft?: number;
 }
 
 interface ChromeLanguageModelGlobal {
@@ -50,71 +52,98 @@ interface RawAIAnalysisPayload {
   paymentTriggerHighRisk?: boolean;
 }
 
-const SYSTEM_PROMPT = `You are ScamShield AI, an expert cybersecurity threat analyst specializing in SMS smishing, WhatsApp scams, phishing emails, UPI QR fraud, and malicious links.
+const SYSTEM_PROMPT = `You are ScamShield AI, a fast, accurate cybersecurity threat analyst for SMS, WhatsApp, email, UPI QR, and links.
 
-Analyze the provided message, Source Context, and any uploaded chat screenshot or QR image carefully. When an image is attached, inspect visible sender headers, phone numbers, international country codes (e.g. non-local codes claiming local banks/couriers), unverified business badges, and UPI QR code details (payee VPA, merchant name, pre-filled amount).
+Inspect the message, Source Context, local signals, and any attached screenshot/QR (check visible sender headers, country codes, unverified badges, and UPI QR payee/amount).
 
-Return ONLY valid JSON matching this structure:
+Return ONLY valid JSON:
 {
   "riskLevel": "Safe" | "Suspicious" | "High Risk",
-  "confidenceScore": number (integer 0 to 100),
-  "detectedChannel": string (e.g. "SMS", "WhatsApp", "Email", "URL / Link", "QR Payment"),
-  "summary": string (1-2 clear sentences explaining the verdict in plain English),
-  "redFlags": string[] (2-5 concise, specific findings; if Safe, list 2-3 verified trust signals instead),
-  "safeActions": string[] (2-4 concrete, actionable safety steps for the user),
+  "confidenceScore": number (0-100),
+  "detectedChannel": string ("SMS" | "WhatsApp" | "Email" | "URL / Link" | "QR Payment"),
+  "summary": string (1 short sentence under 18 words),
+  "redFlags": string[] (max 3 brief bullets, under 10 words each; if Safe, 2-3 brief trust signals under 10 words each),
+  "safeActions": string[] (max 3 brief actionable steps, under 10 words each),
   "senderMismatchStatus": "Mismatch Detected" | "Potential Mismatch" | "Consistent" | "Unverified",
-  "senderMismatchDetail": string (concise note comparing visible sender header/country code/Source Context vs claimed brand),
+  "senderMismatchDetail": string (1 short sentence under 16 words comparing sender/country code/Source Context vs claimed brand),
   "paymentTriggerCategory": string (e.g. "UPI Debit / PIN Approval Trap", "Credential & KYC Phishing Form", "Prize / Advance-Fee Lure", "Doorstep Delivery Verification OTP", "None Detected"),
-  "paymentTriggerDetail": string (concise explanation of what payment or credential action is triggered),
+  "paymentTriggerDetail": string (1 short sentence under 16 words),
   "paymentTriggerHighRisk": boolean
 }
 
-Classification rules:
-- "High Risk": Fake KYC/account suspension threats, lookalike domains (.xyz, .top, multi-hyphen brand spoofs), UPI lottery/reward links or QR codes asking for a UPI PIN to "receive" money, credential/OTP/CVV harvesting, or sender header/country-code impersonation.
-- "Suspicious": Unverified shortened links, mild urgency, unsolicited offers, unknown 10-digit sender making unusual requests, or ambiguous sender context.
-- "Safe": Legitimate transactional/delivery notifications with verified official HTTPS domains and no credential, PIN, or urgent payment traps.`;
+Rules:
+- "High Risk": KYC suspension threats, lookalike/abusive TLDs (.xyz, .top, multi-hyphen bank spoofs), UPI reward/QR links asking for PIN to "receive" money, credential/OTP/CVV harvesting, sender/country-code impersonation.
+- "Suspicious": Shortened links, mild urgency, unsolicited offers, or unverified 10-digit requests.
+- "Safe": Legitimate alerts with official HTTPS domains and no PIN/credential/payment traps (doorstep delivery OTP is safe).`;
 
 const SCAM_RESPONSE_SCHEMA = Schema.object({
   properties: {
     riskLevel: Schema.enumString({
       enum: ['Safe', 'Suspicious', 'High Risk'],
-      description: 'Overall threat classification',
+      description: 'Threat classification',
     }),
     confidenceScore: Schema.integer({
-      description: 'Confidence percentage from 0 to 100',
+      description: 'Confidence 0-100',
     }),
     detectedChannel: Schema.string({
-      description: 'Detected communication channel such as SMS, WhatsApp, Email, QR Payment, or URL / Link',
+      description: 'Channel: SMS, WhatsApp, Email, QR Payment, or URL / Link',
     }),
     summary: Schema.string({
-      description: '1 to 2 sentence plain-English explanation of the verdict',
+      description: '1 short sentence verdict under 18 words',
     }),
     redFlags: Schema.array({
       items: Schema.string(),
-      description: 'Specific red flags detected, or verified trust signals if Safe',
+      description: 'Up to 3 brief bullets under 10 words each',
     }),
     safeActions: Schema.array({
       items: Schema.string(),
-      description: 'Concrete recommended next steps for the user',
+      description: 'Up to 3 brief action bullets under 10 words each',
     }),
     senderMismatchStatus: Schema.enumString({
       enum: ['Mismatch Detected', 'Potential Mismatch', 'Consistent', 'Unverified'],
-      description: 'Whether the sender header, country code, or source context mismatches the claimed identity',
+      description: 'Sender alignment status',
     }),
     senderMismatchDetail: Schema.string({
-      description: 'Concise analysis of sender header, country code, or source context alignment',
+      description: '1 short sentence under 16 words on sender/header match',
     }),
     paymentTriggerCategory: Schema.string({
-      description: 'Short label for the detected payment or credential trigger type',
+      description: 'Payment or credential trigger label',
     }),
     paymentTriggerDetail: Schema.string({
-      description: 'Explanation of the payment or credential trigger mechanism',
+      description: '1 short sentence under 16 words explaining trigger',
     }),
     paymentTriggerHighRisk: Schema.boolean({
-      description: 'Whether the payment or credential trigger poses financial/credential theft risk',
+      description: 'True if financial or credential theft risk',
     }),
   },
 });
+
+const CLOUD_MODEL_ID = 'gemini-2.5-flash';
+
+// Cached AI sessions/models reused across scans for 1-3s latency
+let cachedOnDeviceSession: ChromeLanguageModelSession | null = null;
+let cachedOnDeviceApiKind: OnDeviceCapability['apiKind'] | null = null;
+let cachedOnDevicePromise: Promise<ChromeLanguageModelSession> | null = null;
+let cachedCloudModel: GenerativeModel | null = null;
+
+function getCloudModel(): GenerativeModel {
+  if (!cachedCloudModel) {
+    cachedCloudModel = getGenerativeModel(firebaseAI, {
+      model: CLOUD_MODEL_ID,
+      systemInstruction: SYSTEM_PROMPT,
+      generationConfig: {
+        responseMimeType: 'application/json',
+        responseSchema: SCAM_RESPONSE_SCHEMA,
+        temperature: 0.1,
+        maxOutputTokens: 450,
+        thinkingConfig: {
+          thinkingBudget: 0,
+        },
+      },
+    });
+  }
+  return cachedCloudModel;
+}
 
 function getChromeGlobals(): {
   languageModel?: ChromeLanguageModelGlobal;
@@ -129,6 +158,52 @@ function getChromeGlobals(): {
     languageModel: g.LanguageModel,
     legacyAI: w?.ai ?? g.ai,
   };
+}
+
+async function getOrCreateOnDeviceSession(
+  apiKind: OnDeviceCapability['apiKind']
+): Promise<ChromeLanguageModelSession> {
+  if (cachedOnDeviceSession && cachedOnDeviceApiKind === apiKind) {
+    if (
+      typeof cachedOnDeviceSession.tokensLeft !== 'number' ||
+      cachedOnDeviceSession.tokensLeft > 450
+    ) {
+      return cachedOnDeviceSession;
+    }
+    cachedOnDeviceSession.destroy?.();
+    cachedOnDeviceSession = null;
+  }
+
+  if (cachedOnDevicePromise && cachedOnDeviceApiKind === apiKind) {
+    return cachedOnDevicePromise;
+  }
+
+  const { languageModel, legacyAI } = getChromeGlobals();
+
+  cachedOnDeviceApiKind = apiKind;
+  cachedOnDevicePromise = (async () => {
+    let session: ChromeLanguageModelSession;
+    if (apiKind === 'LanguageModel' && languageModel) {
+      session = await languageModel.create({
+        initialPrompts: [{ role: 'system', content: SYSTEM_PROMPT }],
+      });
+    } else if (apiKind === 'window.ai' && legacyAI?.languageModel) {
+      session = await legacyAI.languageModel.create({
+        systemPrompt: SYSTEM_PROMPT,
+      });
+    } else {
+      throw new Error('On-device Prompt API is unavailable.');
+    }
+
+    cachedOnDeviceSession = session;
+    return session;
+  })();
+
+  try {
+    return await cachedOnDevicePromise;
+  } finally {
+    cachedOnDevicePromise = null;
+  }
 }
 
 export async function detectOnDeviceCapability(): Promise<OnDeviceCapability> {
@@ -246,12 +321,12 @@ function parseAIJsonResponse(rawText: string): RawAIAnalysisPayload {
         : 'Analysis completed.',
     redFlags:
       Array.isArray(parsed.redFlags) && parsed.redFlags.length > 0
-        ? parsed.redFlags.map((item) => String(item).trim()).filter(Boolean)
-        : ['No explicit threat indicators reported.'],
+        ? parsed.redFlags.map((item) => String(item).trim()).filter(Boolean).slice(0, 3)
+        : ['No threat indicators reported.'],
     safeActions:
       Array.isArray(parsed.safeActions) && parsed.safeActions.length > 0
-        ? parsed.safeActions.map((item) => String(item).trim()).filter(Boolean)
-        : ['Verify sender identity through official channels before taking action.'],
+        ? parsed.safeActions.map((item) => String(item).trim()).filter(Boolean).slice(0, 3)
+        : ['Verify sender via official channels.'],
     senderMismatchStatus: normalizeMismatchStatus(parsed.senderMismatchStatus),
     senderMismatchDetail:
       typeof parsed.senderMismatchDetail === 'string' && parsed.senderMismatchDetail.trim()
@@ -282,26 +357,23 @@ function buildUserPrompt(
   const signalText =
     signals.length > 0
       ? signals.map((s) => `- [${s.severity.toUpperCase()}] ${s.kind}: ${s.value} (${s.note})`).join('\n')
-      : '- No URLs, UPI IDs, or email tokens extracted from text.';
+      : '- None';
 
   const imageContext = uploadedImage
-    ? `Attached screenshot / QR image: "${uploadedImage.name}" (${uploadedImage.mimeType}).${
+    ? `Image attached: "${uploadedImage.name}".${
         uploadedImage.decodedQrText
-          ? ` Local QR decoder extracted payload: "${uploadedImage.decodedQrText}".`
-          : ' Inspect the image visually for sender headers, phone numbers, country codes, unverified business tags, or QR details.'
+          ? ` Decoded QR: "${uploadedImage.decodedQrText}".`
+          : ' Inspect visible sender headers, country codes, badges, and QR details.'
       }`
-    : 'No screenshot or QR image attached.';
+    : '';
 
-  return `User-selected channel context: ${channel === 'auto' ? 'Auto-detect' : channel.toUpperCase()}
-User-selected Source Context: ${getSourceContextLabel(sourceContext)}
-${imageContext}
-
-Technical signals extracted locally:
+  return `Channel: ${channel === 'auto' ? 'Auto' : channel.toUpperCase()} | Source: ${getSourceContextLabel(sourceContext)}
+${imageContext ? `${imageContext}\n` : ''}Signals:
 ${signalText}
 
-Message / Link text provided:
+Content:
 """
-${message || '(No text pasted; analyze the attached screenshot / QR image.)'}
+${message || '(Analyze attached screenshot / QR image.)'}
 """`;
 }
 
@@ -309,29 +381,36 @@ async function runOnDevicePromptAPI(
   promptText: string,
   capability: OnDeviceCapability
 ): Promise<{ payload: RawAIAnalysisPayload; modelName: string }> {
-  const { languageModel, legacyAI } = getChromeGlobals();
-  let session: ChromeLanguageModelSession | null = null;
+  const baseSession = await getOrCreateOnDeviceSession(capability.apiKind);
+
+  const runPrompt = async (session: ChromeLanguageModelSession): Promise<string> => {
+    if (typeof session.clone === 'function') {
+      const cloned = await session.clone();
+      try {
+        return await cloned.prompt(promptText);
+      } finally {
+        cloned.destroy?.();
+      }
+    }
+    return session.prompt(promptText);
+  };
 
   try {
-    if (capability.apiKind === 'LanguageModel' && languageModel) {
-      session = await languageModel.create({
-        initialPrompts: [{ role: 'system', content: SYSTEM_PROMPT }],
-      });
-    } else if (capability.apiKind === 'window.ai' && legacyAI?.languageModel) {
-      session = await legacyAI.languageModel.create({
-        systemPrompt: SYSTEM_PROMPT,
-      });
-    } else {
-      throw new Error('On-device Prompt API is unavailable.');
-    }
-
-    const raw = await session.prompt(promptText);
+    const raw = await runPrompt(baseSession);
     return {
       payload: parseAIJsonResponse(raw),
       modelName: 'Gemini Nano (Chrome Prompt API)',
     };
-  } finally {
-    session?.destroy?.();
+  } catch {
+    // Reset stale cached session once and retry
+    cachedOnDeviceSession?.destroy?.();
+    cachedOnDeviceSession = null;
+    const freshSession = await getOrCreateOnDeviceSession(capability.apiKind);
+    const raw = await runPrompt(freshSession);
+    return {
+      payload: parseAIJsonResponse(raw),
+      modelName: 'Gemini Nano (Chrome Prompt API)',
+    };
   }
 }
 
@@ -339,8 +418,7 @@ async function runFirebaseCloudAI(
   promptText: string,
   uploadedImage?: UploadedEvidenceImage | null
 ): Promise<{ payload: RawAIAnalysisPayload; modelName: string }> {
-  const candidateModels = ['gemini-2.5-flash', 'gemini-2.0-flash'];
-  let lastError: unknown = null;
+  const model = getCloudModel();
 
   const contentParts: Array<string | Part> = uploadedImage
     ? [
@@ -355,37 +433,17 @@ async function runFirebaseCloudAI(
       ]
     : [promptText];
 
-  for (const modelId of candidateModels) {
-    try {
-      const model = getGenerativeModel(firebaseAI, {
-        model: modelId,
-        systemInstruction: SYSTEM_PROMPT,
-        generationConfig: {
-          responseMimeType: 'application/json',
-          responseSchema: SCAM_RESPONSE_SCHEMA,
-        },
-      });
+  const result = await model.generateContent(
+    contentParts.length === 1 ? promptText : contentParts
+  );
+  const rawText = result.response.text();
 
-      const result = await model.generateContent(
-        contentParts.length === 1 ? promptText : contentParts
-      );
-      const rawText = result.response.text();
-      return {
-        payload: parseAIJsonResponse(rawText),
-        modelName: uploadedImage
-          ? `${modelId} Multimodal (Firebase AI Logic)`
-          : `${modelId} (Firebase AI Logic)`,
-      };
-    } catch (err) {
-      lastError = err;
-      const errMsg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
-      if (!errMsg.includes('not found') && !errMsg.includes('404') && !errMsg.includes('unsupported')) {
-        throw err;
-      }
-    }
-  }
-
-  throw lastError instanceof Error ? lastError : new Error('Cloud AI analysis failed.');
+  return {
+    payload: parseAIJsonResponse(rawText),
+    modelName: uploadedImage
+      ? `${CLOUD_MODEL_ID} Multimodal (Firebase AI Logic)`
+      : `${CLOUD_MODEL_ID} (Firebase AI Logic)`,
+  };
 }
 
 function mergeTechnicalBreakdown(
@@ -438,7 +496,7 @@ export async function analyzeScamMessage({
   let engine: ScamAnalysisResult['engine'] = 'cloud-fallback';
   let engineDetail = 'Analyzed via Firebase AI Logic (GoogleAIBackend)';
   let payload: RawAIAnalysisPayload;
-  let modelName = 'gemini-2.5-flash';
+  let modelName = CLOUD_MODEL_ID;
 
   // Multimodal image uploads route to Gemini multimodal on Firebase AI Logic so visible headers, country codes, and QR layouts are inspected visually
   const canTryOnDevice = !forceCloud && !uploadedImage && capability.availability !== 'unavailable';
