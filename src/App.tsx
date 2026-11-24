@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Moon, Sun } from 'lucide-react';
 import { AiModeToolbar } from './components/AiModeToolbar';
 import { AnalyzerPanel } from './components/AnalyzerPanel';
 import { ArchitectureAndGuide } from './components/ArchitectureAndGuide';
@@ -17,6 +18,17 @@ import type {
 import { buildLocalTechnicalBreakdown } from './utils/urlInspector';
 
 const HISTORY_STORAGE_KEY = 'scamshield_scan_history_v1';
+const THEME_STORAGE_KEY = 'scamshield_theme_v1';
+
+type ThemeMode = 'light' | 'dark';
+
+function getInitialTheme(): ThemeMode {
+  try {
+    return localStorage.getItem(THEME_STORAGE_KEY) === 'dark' ? 'dark' : 'light';
+  } catch {
+    return 'light';
+  }
+}
 
 function loadSavedHistory(): ScamAnalysisResult[] {
   try {
@@ -43,6 +55,7 @@ function loadSavedHistory(): ScamAnalysisResult[] {
 }
 
 export default function App() {
+  const [theme, setTheme] = useState<ThemeMode>(() => getInitialTheme());
   const [input, setInput] = useState('');
   const [channel, setChannel] = useState<ChannelType>('auto');
   const [sourceContext, setSourceContext] = useState<SourceContext>('unspecified');
@@ -60,6 +73,15 @@ export default function App() {
   const [history, setHistory] = useState<ScamAnalysisResult[]>(() => loadSavedHistory());
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch {
+      // Ignore storage errors
+    }
+  }, [theme]);
 
   const checkCapabilities = useCallback(async () => {
     setCheckingCapability(true);
@@ -174,22 +196,58 @@ export default function App() {
       : 'Cloud Fallback (Firebase AI Logic)';
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
+    <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 transition-colors duration-150">
       <TopBar onNewScan={handleNewScan} />
 
       <main className="mx-auto max-w-[1200px] space-y-8 px-4 py-8 sm:px-6 lg:py-10">
         {/* Hero Header */}
         <section id="analyzer" className="space-y-5">
-          <div className="max-w-3xl">
-            <p className="text-xs font-medium text-slate-500">
-              BuildHybridAI 2026 <span aria-hidden="true">·</span> Chrome Prompt API & Firebase AI Logic
-            </p>
-            <h1 className="mt-2 text-3xl font-bold tracking-tight text-slate-900 text-balance sm:text-4xl">
-              Hybrid AI scam detection for SMS, WhatsApp, email, and links.
-            </h1>
-            <p className="mt-2.5 text-base leading-relaxed text-slate-600">
-              Inspects suspicious messages on-device first using Chrome Built-in AI for instant offline privacy, with seamless cloud reasoning via Firebase AI Logic on any browser.
-            </p>
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div className="max-w-3xl">
+              <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                BuildHybridAI 2026 <span aria-hidden="true">·</span> Chrome Prompt API & Firebase AI Logic
+              </p>
+              <h1 className="mt-2 text-3xl font-bold tracking-tight text-slate-900 dark:text-slate-100 text-balance sm:text-4xl">
+                Hybrid AI scam detection for SMS, WhatsApp, email, and links.
+              </h1>
+              <p className="mt-2.5 text-base leading-relaxed text-slate-600 dark:text-slate-400">
+                Inspects suspicious messages on-device first using Chrome Built-in AI for instant offline privacy, with seamless cloud reasoning via Firebase AI Logic on any browser.
+              </p>
+            </div>
+
+            {/* Light / Dark Mode Switch */}
+            <div
+              role="group"
+              aria-label="Color theme"
+              className="inline-flex self-start items-center gap-1 rounded-lg border border-slate-200 bg-white p-1 dark:border-slate-800 dark:bg-slate-900 shrink-0"
+            >
+              <button
+                type="button"
+                aria-pressed={theme === 'light'}
+                onClick={() => setTheme('light')}
+                className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  theme === 'light'
+                    ? 'bg-slate-900 text-white'
+                    : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
+                }`}
+              >
+                <Sun className="h-3.5 w-3.5" aria-hidden="true" />
+                Light
+              </button>
+              <button
+                type="button"
+                aria-pressed={theme === 'dark'}
+                onClick={() => setTheme('dark')}
+                className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  theme === 'dark'
+                    ? 'bg-slate-100 text-slate-900'
+                    : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
+                }`}
+              >
+                <Moon className="h-3.5 w-3.5" aria-hidden="true" />
+                Dark
+              </button>
+            </div>
           </div>
 
           {/* AI Mode Status Badge & Live Demo Toggle */}
@@ -202,7 +260,7 @@ export default function App() {
           />
 
           {/* Primary 2-Column Workspace */}
-          <div className="grid grid-cols-1 items-stretch gap-6 lg:grid-cols-12">
+          <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-12">
             <div className="lg:col-span-6">
               <AnalyzerPanel
                 input={input}
@@ -244,8 +302,8 @@ export default function App() {
         <ArchitectureAndGuide />
       </main>
 
-      <footer className="mt-12 border-t border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-[1200px] flex-col gap-2 px-4 py-6 text-xs text-slate-500 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+      <footer className="mt-12 border-t border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+        <div className="mx-auto flex max-w-[1200px] flex-col gap-2 px-4 py-6 text-xs text-slate-500 sm:flex-row sm:items-center sm:justify-between sm:px-6 dark:text-slate-400">
           <span>ScamShield AI · Built for BuildHybridAI 2026</span>
           <span>On-device Chrome Prompt API with Firebase AI Logic cloud fallback</span>
         </div>
