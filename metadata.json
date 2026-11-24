@@ -1,0 +1,6 @@
+{
+  "name": "ScamShield AI",
+  "description": "Hybrid on-device and cloud AI scam detector for SMS, WhatsApp messages, phishing emails, and suspicious links.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
