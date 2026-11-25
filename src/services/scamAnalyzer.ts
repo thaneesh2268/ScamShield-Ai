@@ -111,7 +111,19 @@ let cachedOnDevicePromise: Promise<ChromeLanguageModelSession> | null = null;
 let cachedTextCloudModel: GenerativeModel | null = null;
 let cachedVisionCloudModel: GenerativeModel | null = null;
 
-function getTextCloudModel(): GenerativeModel {
+function getTextCloudModel(disableThinking = true): GenerativeModel {
+  if (!disableThinking) {
+    return getGenerativeModel(firebaseAI, {
+      model: CLOUD_MODEL_ID,
+      systemInstruction: TEXT_SYSTEM_PROMPT,
+      generationConfig: {
+        responseMimeType: 'application/json',
+        responseSchema: TEXT_SCAM_RESPONSE_SCHEMA,
+        temperature: 0.1,
+        maxOutputTokens: 512,
+      },
+    });
+  }
   if (!cachedTextCloudModel) {
     cachedTextCloudModel = getGenerativeModel(firebaseAI, {
       model: CLOUD_MODEL_ID,
@@ -120,7 +132,7 @@ function getTextCloudModel(): GenerativeModel {
         responseMimeType: 'application/json',
         responseSchema: TEXT_SCAM_RESPONSE_SCHEMA,
         temperature: 0.1,
-        maxOutputTokens: 260,
+        maxOutputTokens: 512,
         thinkingConfig: {
           thinkingBudget: 0,
         },
@@ -130,7 +142,19 @@ function getTextCloudModel(): GenerativeModel {
   return cachedTextCloudModel;
 }
 
-function getVisionCloudModel(): GenerativeModel {
+function getVisionCloudModel(disableThinking = true): GenerativeModel {
+  if (!disableThinking) {
+    return getGenerativeModel(firebaseAI, {
+      model: CLOUD_MODEL_ID,
+      systemInstruction: VISION_SYSTEM_PROMPT,
+      generationConfig: {
+        responseMimeType: 'application/json',
+        responseSchema: VISION_SCAM_RESPONSE_SCHEMA,
+        temperature: 0.1,
+        maxOutputTokens: 640,
+      },
+    });
+  }
   if (!cachedVisionCloudModel) {
     cachedVisionCloudModel = getGenerativeModel(firebaseAI, {
       model: CLOUD_MODEL_ID,
@@ -139,7 +163,7 @@ function getVisionCloudModel(): GenerativeModel {
         responseMimeType: 'application/json',
         responseSchema: VISION_SCAM_RESPONSE_SCHEMA,
         temperature: 0.1,
-        maxOutputTokens: 360,
+        maxOutputTokens: 640,
         thinkingConfig: {
           thinkingBudget: 0,
         },
@@ -414,31 +438,71 @@ async function runFirebaseCloudAI(
   promptText: string,
   uploadedImage?: UploadedEvidenceImage | null
 ): Promise<{ payload: RawAIAnalysisPayload; modelName: string }> {
-  if (uploadedImage) {
-    const model = getVisionCloudModel();
-    const contentParts: Array<string | Part> = [
-      promptText,
-      {
-        type: 'inlineData',
-        inlineData: {
-          mimeType: uploadedImage.mimeType,
-          data: uploadedImage.base64Data,
+  const invokeModel = async (model: GenerativeModel): Promise<RawAIAnalysisPayload> => {
+    if (uploadedImage) {
+      const contentParts: Array<string | Part> = [
+        promptText,
+        {
+          type: 'inlineData',
+          inlineData: {
+            mimeType: uploadedImage.mimeType,
+            data: uploadedImage.base64Data,
+          },
         },
-      },
-    ];
-    const result = await model.generateContent(contentParts);
-    return {
-      payload: parseAIJsonResponse(result.response.text()),
-      modelName: `${CLOUD_MODEL_ID} Multimodal (Firebase AI Logic)`,
-    };
-  }
-
-  const model = getTextCloudModel();
-  const result = await model.generateContent(promptText);
-  return {
-    payload: parseAIJsonResponse(result.response.text()),
-    modelName: `${CLOUD_MODEL_ID} (Firebase AI Logic)`,
+      ];
+      const result = await model.generateContent(contentParts);
+      return parseAIJsonResponse(result.response.text());
+    }
+    const result = await model.generateContent(promptText);
+    return parseAIJsonResponse(result.response.text());
   };
+
+  try {
+    const primaryModel = uploadedImage ? getVisionCloudModel(true) : getTextCloudModel(true);
+    const payload = await invokeModel(primaryModel);
+    return {
+      payload,
+      modelName: uploadedImage
+        ? `${CLOUD_MODEL_ID} Multimodal (Firebase AI Logic)`
+        : `${CLOUD_MODEL_ID} (Firebase AI Logic)`,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+    // Retry without thinkingConfig or with gemini-2.0-flash if config/model param is rejected
+    if (
+      msg.includes('thinking') ||
+      msg.includes('invalid') ||
+      msg.includes('not found') ||
+      msg.includes('404') ||
+      msg.includes('json')
+    ) {
+      const fallbackModelId = msg.includes('not found') || msg.includes('404') ? 'gemini-2.0-flash' : CLOUD_MODEL_ID;
+      const fallbackModel =
+        fallbackModelId === CLOUD_MODEL_ID
+          ? uploadedImage
+            ? getVisionCloudModel(false)
+            : getTextCloudModel(false)
+          : getGenerativeModel(firebaseAI, {
+              model: fallbackModelId,
+              systemInstruction: uploadedImage ? VISION_SYSTEM_PROMPT : TEXT_SYSTEM_PROMPT,
+              generationConfig: {
+                responseMimeType: 'application/json',
+                responseSchema: uploadedImage ? VISION_SCAM_RESPONSE_SCHEMA : TEXT_SCAM_RESPONSE_SCHEMA,
+                temperature: 0.1,
+                maxOutputTokens: uploadedImage ? 640 : 512,
+              },
+            });
+
+      const payload = await invokeModel(fallbackModel);
+      return {
+        payload,
+        modelName: uploadedImage
+          ? `${fallbackModelId} Multimodal (Firebase AI Logic)`
+          : `${fallbackModelId} (Firebase AI Logic)`,
+      };
+    }
+    throw err;
+  }
 }
 
 function mergeTechnicalBreakdown(
