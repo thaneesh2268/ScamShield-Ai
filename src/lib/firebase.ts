@@ -2,6 +2,7 @@ import { initializeApp, getApps, getApp, type FirebaseApp } from 'firebase/app';
 import { getAnalytics, isSupported, logEvent, type Analytics } from 'firebase/analytics';
 import { getAI, GoogleAIBackend, type AI } from 'firebase/ai';
 
+  import { initializeAppCheck, ReCaptcha, ReCaptchaEnterpriseProvider } from 'firebase/app-check';
 // Firebase configuration for ScamShield AI
 export const firebaseConfig = {
   apiKey: 'AIzaSyCSSRedNj2I-7H5aS_T7jjloPoAd4goJ9U',
@@ -14,6 +15,7 @@ export const firebaseConfig = {
 };
 
 export const firebaseApp: FirebaseApp = getApps().length ? getApp() : initializeApp(firebaseConfig);
+initializeAppCheck
 
 // Initialize Firebase AI Logic with the Gemini Developer API backend (GoogleAIBackend)
 export const firebaseAI: AI = getAI(firebaseApp, {
