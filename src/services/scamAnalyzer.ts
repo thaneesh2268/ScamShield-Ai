@@ -102,7 +102,7 @@ const VISION_SCAM_RESPONSE_SCHEMA = Schema.object({
   },
 });
 
-const CLOUD_MODEL_ID = 'gemini-2.5-flash';
+const CLOUD_MODEL_ID = 'gemini-3.8-flash';
 
 // Cached sessions/models reused across scans
 let cachedOnDeviceSession: ChromeLanguageModelSession | null = null;
